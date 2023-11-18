@@ -24,6 +24,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
 	"github.com/labstack/gommon/log"
+	"github.com/newrelic/go-agent/v3/newrelic"
+	"github.com/newrelic/go-agent/v3/integrations/nrecho-v4"
 )
 
 const (
@@ -211,8 +213,21 @@ func main() {
 	e.Debug = true
 	e.Logger.SetLevel(log.DEBUG)
 
+	app, err := newrelic.NewApplication(
+		newrelic.ConfigAppName(os.Getenv("NEW_RELIC_APP_NAME")),
+		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
+		newrelic.ConfigAppLogForwardingEnabled(true),
+		newrelic.ConfigAppLogEnabled(true),
+	)
+	if err != nil {
+		fmt.Errorf("failed to init newrelic NewApplication reason: %v", err)
+	} else {
+		fmt.Println("newrelic init success")
+	}
+
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
+	e.Use(nrecho.Middleware(app))
 
 	e.POST("/initialize", postInitialize)
 
@@ -238,7 +253,6 @@ func main() {
 
 	mySQLConnectionData = NewMySQLConnectionEnv()
 
-	var err error
 	db, err = mySQLConnectionData.ConnectDB()
 	if err != nil {
 		e.Logger.Fatalf("failed to connect db: %v", err)
@@ -257,6 +271,20 @@ func main() {
 	e.Logger.Fatal(e.Start(serverPort))
 }
 
+func getSessionWithCtx(c echo.Context, r *http.Request) (*sessions.Session, error) {
+	txn := nrecho.FromContext(c)
+	segment := newrelic.Segment{}
+	segment.Name = "getSession"
+	segment.StartTime = txn.StartSegmentNow()
+	defer segment.End()
+
+	session, err := sessionStore.Get(r, sessionName)
+	if err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
 func getSession(r *http.Request) (*sessions.Session, error) {
 	session, err := sessionStore.Get(r, sessionName)
 	if err != nil {
@@ -266,7 +294,13 @@ func getSession(r *http.Request) (*sessions.Session, error) {
 }
 
 func getUserIDFromSession(c echo.Context) (string, int, error) {
-	session, err := getSession(c.Request())
+	txn := nrecho.FromContext(c)
+	segment := newrelic.Segment{}
+	segment.Name = "getUserIDFromSession"
+	segment.StartTime = txn.StartSegmentNow()
+	defer segment.End()
+
+	session, err := getSessionWithCtx(c, c.Request())
 	if err != nil {
 		return "", http.StatusInternalServerError, fmt.Errorf("failed to get session: %v", err)
 	}
@@ -277,6 +311,11 @@ func getUserIDFromSession(c echo.Context) (string, int, error) {
 
 	jiaUserID := _jiaUserID.(string)
 	var count int
+
+	segment2 := newrelic.Segment{}
+	segment2.Name = "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?"
+	segment2.StartTime = txn.StartSegmentNow()
+	defer segment2.End()
 
 	err = db.Get(&count, "SELECT COUNT(*) FROM `user` WHERE `jia_user_id` = ?",
 		jiaUserID)
@@ -442,6 +481,12 @@ func getMe(c echo.Context) error {
 // GET /api/isu
 // ISUの一覧を取得
 func getIsuList(c echo.Context) error {
+	txn := nrecho.FromContext(c)
+	segment := newrelic.Segment{}
+	segment.Name = "getIsuList"
+	segment.StartTime = txn.StartSegmentNow()
+	defer segment.End()
+
 	jiaUserID, errStatusCode, err := getUserIDFromSession(c)
 	if err != nil {
 		if errStatusCode == http.StatusUnauthorized {
@@ -459,6 +504,11 @@ func getIsuList(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
+	segment2 := newrelic.Segment{}
+	segment2.Name = "SELECT * FROM `isu` WHERE `jia_user_id` = ? ORDER BY `id` DESC"
+	segment2.StartTime = txn.StartSegmentNow()
+	defer segment2.End()
+
 	isuList := []Isu{}
 	err = tx.Select(
 		&isuList,
@@ -471,6 +521,11 @@ func getIsuList(c echo.Context) error {
 
 	responseList := []GetIsuListResponse{}
 	for _, isu := range isuList {
+		segment := newrelic.Segment{}
+		segment.Name = "for _, isu := range isuList"
+		segment.StartTime = txn.StartSegmentNow()
+		defer segment.End()
+
 		var lastCondition IsuCondition
 		foundLastCondition := true
 		err = tx.Get(&lastCondition, "SELECT * FROM `isu_condition` WHERE `jia_isu_uuid` = ? ORDER BY `timestamp` DESC LIMIT 1",
@@ -1158,6 +1213,12 @@ func getTrend(c echo.Context) error {
 // POST /api/condition/:jia_isu_uuid
 // ISUからのコンディションを受け取る
 func postIsuCondition(c echo.Context) error {
+	txn := nrecho.FromContext(c)
+	segment := newrelic.Segment{}
+	segment.Name = "postIsuCondition"
+	segment.StartTime = txn.StartSegmentNow()
+	defer segment.End()
+
 	// TODO: 一定割合リクエストを落としてしのぐようにしたが、本来は全量さばけるようにすべき
 	dropProbability := 0.9
 	if rand.Float64() <= dropProbability {
@@ -1196,6 +1257,11 @@ func postIsuCondition(c echo.Context) error {
 	}
 
 	for _, cond := range req {
+		segment := newrelic.Segment{}
+		segment.Name = "for _, cond := range req"
+		segment.StartTime = txn.StartSegmentNow()
+		defer segment.End()
+
 		timestamp := time.Unix(cond.Timestamp, 0)
 
 		if !isValidConditionFormat(cond.Condition) {
